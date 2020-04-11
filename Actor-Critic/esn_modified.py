@@ -11,8 +11,8 @@ Readout training with Moore-Penrose Matrix Inverse or Ridge Regression (added)
 
 Changes for Otsuka's model architecture:
     - sigmoid function for update of memory layer (reservoir units)
-    - gain parameters for updates
-    - default out activation: sigmoid
+    - default out activation: sigmoid (but this is based on the RNN model in Otsuka's phd paper)
+    - get_states method to work with continuation
 
 """
 
@@ -65,11 +65,7 @@ class ESN():
                  out_activation=np.tanh, inverse_out_activation=np.arctanh,
                  silent=True, 
                  augmented=False,
-                 transient=200,
-                 
-                 gain_memory=1,
-                 gain_observation=1,
-                 gain_reward=1
+                 transient=200
                  ):
         """
         Args:
@@ -125,13 +121,14 @@ class ESN():
         self.augmented = augmented
         self.transient = transient
         
+        self.laststate = np.zeros(self.n_reservoir)
+        self.lastinput = np.zeros(self.n_inputs)
+        self.lastoutput = np.zeros(self.n_inputs)
+        
         self.initweights()
 
     def initweights(self):
         # initialize recurrent weights:
-        
-#        # begin with a random matrix centered around zero:
-#        W = self.random_state_.rand(self.n_reservoir, self.n_reservoir) - 0.5
         
         # [nk] following Jaeger's paper:
         W = np.random.uniform(low = -1, high = 1, size = (self.n_reservoir, self.n_reservoir))
@@ -142,10 +139,6 @@ class ESN():
         radius = np.max(np.abs(np.linalg.eigvals(W)))
         # rescale them to reach the requested spectral radius:
         self.W = W * (self.spectral_radius / radius)
-
-#        # random input weights:
-#        self.W_in = self.random_state_.rand(
-#            self.n_reservoir, self.n_inputs) * 2 - 1
             
         # [nk] following Jaeger's paper:
         # added scaling
@@ -154,6 +147,10 @@ class ESN():
         # random feedback (teacher forcing) weights:
         self.W_feedb = np.random.RandomState().rand(
             self.n_reservoir, self.n_outputs) * 2 - 1
+                
+    def resetState(self):
+        self.laststate = np.zeros((1,self.n_reservoir))
+        return self.laststate
 
     def _update(self, state, input_pattern, output_pattern=None):
         """performs one update step.
@@ -164,12 +161,10 @@ class ESN():
             preactivation = (np.dot(self.W, state)
                              + np.dot(self.W_in, input_pattern)
                              + np.dot(self.W_feedb, output_pattern)
-                             + self.gain_memory
                              )
         else:
             preactivation = (np.dot(self.W, state)
                              + np.dot(self.W_in, input_pattern)
-                             + self.gain_memory
                              )
             
         # [nk] add noise - the original code added noise after applying non-linearity!
@@ -206,8 +201,8 @@ class ESN():
             teacher_scaled = teacher_scaled / self.teacher_scaling
         return teacher_scaled
     
-    ## !! will have to adjust this for online learning
-    def get_states(self, inputs, outputs=None, inspect=False, extended=True):
+    
+    def get_states(self, inputs, outputs=None, inspect=False, extended=False, continuation=False):
         """
         [nk]
         Collect the network's neuron activations.
@@ -221,36 +216,65 @@ class ESN():
         # transform any vectors of shape (x,) into vectors of shape (x,1):
         if inputs.ndim < 2:
             inputs = np.reshape(inputs, (len(inputs), -1))
-        inputs_scaled = self._scale_inputs(inputs)  # scale
         
         if outputs is not None and outputs.ndim < 2:
             outputs = np.reshape(outputs, (len(outputs), -1))
-            teachers_scaled = self._scale_teacher(outputs)
 
+        n_samples = inputs.shape[0]
+            
+        # use last state, input, output
+        if continuation:
+            laststate = self.laststate
+            lastinput = self.lastinput
+            lastoutput = self.lastoutput
+        else:
+            laststate = np.zeros(self.n_reservoir)
+            lastinput = np.zeros(self.n_inputs)
+            lastoutput = np.zeros(self.n_outputs)
+            
         if not self.silent:
-            print("harvesting states...")
-        # step the reservoir through the given input, output pairs:
-        states = np.zeros((inputs.shape[0], self.n_reservoir))
-        augmented_states = np.zeros((inputs.shape[0], self.n_reservoir*2+2))
-        # initialise first row with first input and zero states
-        augmented_states[0,:] = np.hstack((np.hstack((inputs_scaled[0,:],np.zeros(self.n_reservoir))),
-                                                    np.hstack((np.power(inputs_scaled[0,:],2),np.zeros(self.n_reservoir)))
-                                                    ))
+            print("harvesting states...")    
+
+        # create scaled input and output vector
+        inputs_scaled = np.vstack([lastinput, self._scale_inputs(inputs)])
+        if outputs is not None:
+            teachers_scaled = np.vstack([lastoutput, self._scale_teacher(outputs)])
+        # create states vector
+        states = np.vstack(
+            [laststate, np.zeros((n_samples, self.n_reservoir))])
         
-        for n in range(1, inputs.shape[0]):
+        
+        if self.augmented:
+            # create extended states vector
+            lastaugmentedstate = np.hstack((np.hstack((lastinput, laststate)),
+                                                        np.hstack((np.power(lastinput,2),np.power(laststate,2)))
+                                                        ))
+            augmented_states = np.vstack(
+                    [lastaugmentedstate,np.zeros((n_samples, self.n_reservoir*2+2))])
+            
+        
+        # step the reservoir through the given input, output pairs:
+        for n in range(1, n_samples+1):
             if outputs is not None:
                 states[n, :] = self._update(states[n - 1], inputs_scaled[n, :],
                                         teachers_scaled[n - 1, :])
             else:
                 states[n, :] = self._update(states[n - 1], inputs_scaled[n, :])
             
-            # x_squares(n) =  (u(n), x1(n), ... , xN(n), u^2(n), x1^2(n), ... , xN^2(n))
-            # ! teacher forcing version missing
-            augmented_states[n,:] = np.hstack((np.hstack((inputs_scaled[n,:],states[n,:])),
-                                                    np.hstack((np.power(inputs_scaled[n,:],2),np.power(states[n,:],2)))
-                                                    ))
+            if self.augmented:
+                # x_squares(n) =  (u(n), x1(n), ... , xN(n), u^2(n), x1^2(n), ... , xN^2(n))
+                # ! teacher forcing version missing
+                augmented_states[n,:] = np.hstack((np.hstack((inputs_scaled[n,:],states[n,:])),
+                                                        np.hstack((np.power(inputs_scaled[n,:],2),np.power(states[n,:],2)))
+                                                        ))
         # include the raw inputs for states
         extended_states = np.hstack((inputs_scaled, states))
+        
+        # remember the last state, input, output for later:
+        self.laststate = states[-1, :]
+        self.lastinput = inputs_scaled[-1, :]
+        if outputs is not None:
+            self.lastoutput = teachers_scaled[-1, :]
         
         # output states
         if self.augmented:
@@ -260,7 +284,7 @@ class ESN():
         else:
             out = states
        
-        return out
+        return out[1:]    #output without last state
 
     def fit(self, inputs, outputs, inspect):
         """
@@ -286,8 +310,6 @@ class ESN():
         # network states that is closest to the target output
         if not self.silent:
             print("fitting...")
-        # [nk] disregard the first few states:
-#        transient = min(int(inputs.shape[1] / 10), 100)
         
         # Solve for W_out:
         if self.readout == 'pseudo-inverse':
@@ -298,11 +320,6 @@ class ESN():
             self.readout.fit(states[self.transient:, :], teachers_scaled[self.transient:, :])
         else:
             raise ValueError('Invalid readout parameter: Must be either "ridge" or "pseudo-inverse".')
-
-        # remember the last state for later:
-        self.laststate = states[-1, :]
-        self.lastinput = inputs[-1, :]
-        self.lastoutput = teachers_scaled[-1, :]
 
         # optionally visualize the collected states
         if inspect:
@@ -326,65 +343,26 @@ class ESN():
             print(np.sqrt(np.mean((pred_train - outputs)**2)))
         return pred_train
 
-    def predict(self, inputs, continuation=True):
+    
+    def predict(self, states):
         """
         Apply the learned weights to the network's reactions to new input.
         Args:
-            inputs: array of dimensions (N_test_samples x n_inputs)
-            continuation: if True, start the network from the last training state
-            augmented: if true, create a squared version of the network states
+            states: the reservoir of the network which has been activated by the input
         Returns:
             Array of output activations
         """
-        if inputs.ndim < 2:
-            inputs = np.reshape(inputs, (len(inputs), -1))
-        n_samples = inputs.shape[0]
-
-        if continuation:
-            laststate = self.laststate
-            lastinput = self.lastinput
-            lastoutput = self.lastoutput
-        else:
-            laststate = np.zeros(self.n_reservoir)
-            lastinput = np.zeros(self.n_inputs)
-            lastoutput = np.zeros(self.n_outputs)
-
-        inputs = np.vstack([lastinput, self._scale_inputs(inputs)])
-        states = np.vstack(
-            [laststate, np.zeros((n_samples, self.n_reservoir))])
-        
-        if self.augmented:
-            augmented_states = np.zeros((n_samples+1, self.n_reservoir*2+2))
-            # initialise first row with augmented last input + last state
-            augmented_states[0,:] = np.hstack((np.hstack((lastinput,laststate)),
-                                                    np.hstack((np.power(lastinput,2),np.power(laststate,2)))
-                                                    ))
-            
-        outputs = np.vstack(
-            [lastoutput, np.zeros((n_samples, self.n_outputs))])
-
+        n_samples = states.shape[0]
+          
+        # output predictions for each input
+        outputs = np.zeros((n_samples, self.n_outputs))
         for n in range(n_samples):
-            states[
-                n + 1, :] = self._update(states[n, :], inputs[n + 1, :], outputs[n, :])
-            
-            if self.augmented:
-                augmented_states[n + 1,:] = np.hstack((np.hstack((inputs[n + 1,:],states[n + 1,:])),
-                                                    np.hstack((np.power(inputs[n + 1,:],2),np.power(states[n + 1,:],2)))))
-                
-                if self.readout == 'pseudo-inverse':
-                    outputs[n + 1, :] = self.out_activation(np.dot(self.W_out,augmented_states[n + 1,:]))
-                else:   # ridge
-                    outputs[n + 1, :] = self.readout.predict(augmented_states[n + 1,:].reshape(1,-1))
-            else:
-                if self.readout == 'pseudo-inverse':
-                    outputs[n + 1, :] = self.out_activation(np.dot(self.W_out,
-                                                           np.concatenate([inputs[n + 1, :], states[n + 1, :]])))
-                else:  # ridge
-                    outputs[n + 1, :] = self.readout.predict(np.concatenate([inputs[n + 1, :], states[n + 1, :]]).reshape(1,-1))   
+            if self.readout == 'pseudo-inverse':
+                outputs[n, :] = self.out_activation(np.dot(self.W_out,states[n,:]))
+            else:   # ridge
+                outputs[n, :] = self.readout.predict(states[n,:].reshape(1,-1))
         
-        #unscaled_outputs = self._unscale_teacher(self.out_activation(outputs[1:]))
-        # ! should not apply tanh function again!!
-        unscaled_outputs = self._unscale_teacher(outputs[1:])
+        unscaled_outputs = self._unscale_teacher(outputs)
         
         return unscaled_outputs
     

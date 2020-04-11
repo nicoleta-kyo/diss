@@ -5,8 +5,10 @@ Changes:
 - Embodiment for environment Frozen Lake
 - RL Learning by a variant of SARSA - to Hinton's paper "Using Q-energies"
      *using sensors and motors variables (not the state variable)
+     
 For Otsuka's model architecture:
 - Memory layer
+- Predictor ESN as parameter so it can have access to its state
 
 """ 
 
@@ -130,15 +132,19 @@ class ising:
     def UpdateSensors(self, state=None, memory=None):
         if state is None:
             self.sensors[:self.Ssize] = 2 * bitfield(self.observation, self.Ssize) - 1
-            self.sensors[self.Ssize:self.Memsize] = memory  # !! how is that going to work?
+            self.sensors[self.Ssize:self.Inpsize] = memory  # !! how is that going to work?
         else:
-            self.sensors[:self.Ssize] = 2 * bitfield(state, self.Ssize) - 1
-            self.sensors[self.Ssize:self.Memsize] = memory
-            
+            self.sensors = self.createJointInput(state, memory)
+       
+    def createJointInput(self, state, memory):
+        inp = np.zeros(self.Inpsize)
+        inp[:self.Ssize] = bitfield(state, self.Ssize)
+        inp[self.Ssize:self.Inpsize] = memory
+        return inp
         
     # Update the state of the motor?
     def UpdateMotors(self, action):
-        self.motors = 2 * bitfield(action, self.Msize) - 1
+        self.motors = bitfield(action, self.Msize)
 
     # Execute step of the Glauber algorithm to update the state of one unit
     def GlauberStep(self, i=None): 
@@ -274,16 +280,18 @@ class ising:
         return ve
     
     # takes in state and action and uses their binary equivalents to calculate the energy (not the actual network's)
-    def CalcFreeEnergy(self, state, action):
+    # state_bit = binarised observation + memory
+    # action = the int action
+    def CalcFreeEnergy(self, state_bit, action):
         
 #         pdb.set_trace()
-        
-        sensors[] = 2 * bitfield(state, self.Inpsize) - 1  #simulate sensors,motors of the network for the state, action
-        motors = 2 * bitfield(action, self.Msize) - 1
-        
-        ve = self.ExpectedValueExperts(sensors, motors).reshape(-1,1)  #calculate expected hidden values
-        ss = sensors.reshape(1,-1)
-        sm = motors.reshape(1,-1) 
+          
+        #binarise action
+        action_bit = bitfield(action, self.Msize)
+    
+        ve = self.ExpectedValueExperts(state_bit, action_bit).reshape(-1,1)  #calculate expected hidden values
+        ss = state_bit.reshape(1,-1)
+        sm = action_bit.reshape(1,-1) 
         
         # calculate the negative log-likelihood
         a = -np.dot(np.dot(ss, self.J[:self.Inpsize,self.Inpsize:-self.Msize]), ve)    # 1
@@ -301,7 +309,7 @@ class ising:
     
     def SarsaLearning(self, total_episodes, max_steps, Beta, gamma=None, lr=None):
         
-#         pdb.set_trace()
+        pdb.set_trace()
         
         self.rewards = np.zeros(total_episodes)
         
@@ -309,32 +317,49 @@ class ising:
             
             beta = Beta[episode]
             
+            # reset the environment
             state = self.env.reset()
-            self.UpdateSensors(state)
+            
+            # reset the memory of the predictor, reset the sensors
+            memory = self.predictor.resetState()
+            self.UpdateSensors(state, memory)
 
-            action = self.ChooseAction(state, beta)
+            # choose a (action) based on s = obs+m (obs+memory)
+            state_memory = self.createJointInput(state, memory)
+            action = self.ChooseAction(state_memory, beta)
             self.UpdateMotors(action)
            
-            Q1 = -1*self.CalcFreeEnergy(state, action)   #calculate Q1 = Q(s,a) = -F(s,a)
+            # calculate Q(s,a)
+            Q1 = -1*self.CalcFreeEnergy(state_memory, action)
 
             t = 0
             while t < max_steps:
                 
-#                self.env.render()
+                # calculate m'
+                state_bit = bitfield(state, self.Ssize)     # binarise state
+                action_bit = bitfield(action, self.Msize)   # binarise action
+                esn_input = np.hstack([state_bit, action_bit]).reshape(1,-1)
+                memory2 = self.predictor.get_states(esn_input, continuation=True)
                 
+                # step with a and receive obs'
                 state2, reward, done, info = self.env.step(action)
-
-                action2 = self.ChooseAction(state2, beta)
                 
-                Q2 = -1*self.CalcFreeEnergy(state2, action2)        #calculate Q2 = Q(s',a') = -F(s',a')
+                # choose a' based on s' = obs'+m'
+                state_memory2 = self.createJointInput(state2, memory2)   # add the predictor's state to the obsrvations
+                action2 = self.ChooseAction(state_memory2, beta)
+                
+                # calculate Q(s',a')
+                Q2 = -1*self.CalcFreeEnergy(state_memory2, action2)        #calculate Q2 = Q(s',a') = -F(s',a')
 
+                # make update to the weights of the network currently having s and a
                 self.SarsaUpdate(Q1, reward, Q2, gamma, lr)
 
-                #update the network
-                self.UpdateSensors(state2)
-                self.UpdateMotors(action2)
-                action = action2   # no need to update state, because not needed - Q1 is directly calculated
-                Q1 = Q2
+                # updates for loop
+                self.UpdateSensors(state2, memory2)  # update the network's sensors to be s' 
+                self.UpdateMotors(action2)  # update the network's motors to be a'
+                state = state2  # update obs = obs'   (needed to calculate m' = obs + a)
+                action = action2  # update a = a'  (needed to calculate m' = obs + a and to also get obs')
+                Q1 = Q2  # no need to update m (memory), because Q1 is directly updated
 
                 t += 1
 
@@ -381,7 +406,8 @@ class ising:
         self.h[-self.Msize:] = self.h[-self.Msize:] + rDiff*self.motors
         self.h[self.Inpsize:-self.Msize] =  self.h[self.Inpsize:-self.Msize] + rDiff*ve
         
-        
+    
+    # state = observation + memory
     def ChooseAction(self, state, beta):
         
         try:
@@ -424,4 +450,5 @@ def bitfield(n, size):
 
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
+
 
