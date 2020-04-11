@@ -11,7 +11,8 @@ Readout training with Moore-Penrose Matrix Inverse or Ridge Regression (added)
 
 Changes for Otsuka's model architecture:
     - sigmoid function for update of memory layer (reservoir units)
-    - default out activation: sigmoid (but this is based on the RNN model in Otsuka's phd paper)
+    - ???? initialisation of reservoir weights
+    - default out activation: tanh
     - get_states method to work with continuation
 
 """
@@ -126,7 +127,8 @@ class ESN():
         self.lastoutput = np.zeros(self.n_inputs)
         
         self.initweights()
-
+        self.history={}
+        
     def initweights(self):
         # initialize recurrent weights:
         
@@ -365,4 +367,7 @@ class ESN():
         unscaled_outputs = self._unscale_teacher(outputs)
         
         return unscaled_outputs
+    
+    def evalHistory(self):
+        
     
