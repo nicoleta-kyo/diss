@@ -9,6 +9,7 @@ Changes:
 For Otsuka's model architecture:
 - Memory layer
 - Predictor ESN as parameter so it can have access to its state
+- Sensors are 0/1 for SARSA learning and -1/1 for critical learning
 
 """ 
 
@@ -75,8 +76,6 @@ class ising:
             return self.s[self.Inpsize:]
         elif mode == 'hidden':
             return self.s[self.Inpsize:-self.Msize]
-#        elif mode == 'memory':
-#            return self.s[self.]
 
     # gets the index of the configuration of the neurons - state as one number
     def get_state_index(self, mode='all'):
@@ -89,7 +88,6 @@ class ising:
         # the sensors act as biases to the sensor states
         # !! does it make sense to randomise the memory as well?
         self.sensors = np.random.randint(0, 2, self.Inpsize) * 2 - 1    # make sensor inputs -1 or 1
-#        self.motors = self.s[-self.Msize:]
 
     # Randomize the position of the agent
     def randomize_position(self):
@@ -124,16 +122,17 @@ class ising:
         observation, reward, done, info = self.env.step(action)
         
         self.observation = observation  # update latest observation
+        self.action = action
         
         self.rewardsPerEpisode += reward    #update rewards per episode
         self.observations[(self.observations == -1).argmax()] = observation      #add to list woth visited states
 
     # Update the state of the sensor
     def UpdateSensors(self, state=None, memory=None):
-        if state is None:
+        if state is None:  # it is for critical learning
             self.sensors[:self.Ssize] = 2 * bitfield(self.observation, self.Ssize) - 1
-            self.sensors[self.Ssize:self.Inpsize] = memory  # !! how is that going to work?
-        else:
+            self.sensors[self.Ssize:self.Inpsize] = 2 * memory - 1
+        else:              # it is for noncritical, sarsa learning
             self.sensors = self.createJointInput(state, memory)
        
     def createJointInput(self, state, memory):
@@ -165,8 +164,14 @@ class ising:
             i = np.random.randint(-1, self.size)
         if i == -1:
             self.Move()
-            self.predictor.updateMemory()  # improve the predictor
-            self.UpdateSensors()
+            
+            # m' = f(s, a)  
+            state_bit = bitfield(self.sensors, self.Ssize)     # (self.sensors = s, self.observation = s')
+            action_bit = bitfield(self.action, self.Msize)     # (self.action = a)
+            esn_input = np.hstack([state_bit, action_bit]).reshape(1,-1)
+            memory = self.predictor.get_states(esn_input, continuation=True)
+            
+            self.UpdateSensors(memory=memory)
         else:
             self.GlauberStep(i)
 
@@ -244,8 +249,6 @@ class ising:
             self.J += u * dJ
 
             if it % 10 == 0:
-                #!! is the memory of the esn restarted at every episode? if not, cant randomise
-                # state because it randomises the memory as well
                 self.randomize_state()
                 self.randomize_position()
                 
