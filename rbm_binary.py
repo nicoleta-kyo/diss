@@ -48,7 +48,7 @@ class ising:
         
         self.rewardsPerEpisode = 0     #keep track of rewards
         self.successfulEpisodes = 0
-        self.observations = np.repeat(-1,1000*5000)    #keep track of reached states
+#         self.observations = np.repeat(-1,1000*5000)    #keep track of reached states
         
       
     def initialise_wiring(self):
@@ -113,7 +113,7 @@ class ising:
         self.observation = observation  # update latest observation
         
         self.rewardsPerEpisode += reward    #update rewards per episode
-        self.observations[(self.observations == -1).argmax()] = observation      #add to list woth visited states
+#         self.observations[(self.observations == -1).argmax()] = observation      #add to list woth visited states
 
     # Update the state of the sensor
     def UpdateSensors(self, state=None):
@@ -284,9 +284,10 @@ class ising:
     
     def SarsaLearning(self, total_episodes, max_steps, Beta, gamma=None, lr=None):
         
-#        pdb.set_trace()
+#         pdb.set_trace()
         
         self.rewards = np.zeros(total_episodes)
+        self.observations = np.repeat(-1, (total_episodes*(max_steps+1))).reshape(total_episodes, (max_steps+1))
         
         for episode in range(total_episodes):
             
@@ -294,6 +295,8 @@ class ising:
             
             state = self.env.reset()
             self.UpdateSensors(state)
+            self.x = np.repeat(-1, max_steps+1)
+            self.x[0] = state
 
             action = self.ChooseAction(state, beta)
             self.UpdateMotors(action)
@@ -303,7 +306,7 @@ class ising:
             t = 0
             while t < max_steps:
                 
-#                self.env.render()
+                self.env.render()
                 
                 state2, reward, done, info = self.env.step(action)
 
@@ -320,11 +323,13 @@ class ising:
                 Q1 = Q2
 
                 t += 1
+                self.x[t] = state2
 
                 if done:
                     break
                     
             self.rewards[episode] = reward
+            self.observations[episode,:] = self.x
     
     # works with the network's actual sensors and motors
     def SarsaUpdate(self, Q1, reward, Q2, gamma, lr):
@@ -379,11 +384,13 @@ class ising:
                 p_a[a,0] = a  #add index column
 
             # sample an action from the distribution
-            ord_p_a = p_a[p_a[:,1].argsort()]
-            ord_p_a[:,1] = np.cumsum(ord_p_a[:,1])
+            act = np.random.choice(a=4,p=p_a[:,1])
+            
+#             ord_p_a = p_a[p_a[:,1].argsort()]
+#             ord_p_a[:,1] = np.cumsum(ord_p_a[:,1])
 
-            b = np.array(ord_p_a[:,1] > np.random.rand())
-            act = int(ord_p_a[b.argmax(),0])  # take the index of the chosen action
+#             b = np.array(ord_p_a[:,1] > np.random.rand())
+#             act = int(ord_p_a[b.argmax(),0])  # take the index of the chosen action
         
         except RuntimeWarning:
             pdb.set_trace()
@@ -407,4 +414,3 @@ def bitfield(n, size):
 
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
-
