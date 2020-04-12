@@ -29,7 +29,7 @@ class ising:
 
         self.h = np.zeros(netsize) # local biases
         self.J = np.zeros((netsize, netsize)) # symmetic weights between hidden variables
-        self.max_weights = 2          # why do we need to restrict the weights to a maximum value?
+#        self.max_weights = 2          # why do we need to restrict the weights to a maximum value?
 
         self.randomize_state()
 
@@ -46,7 +46,7 @@ class ising:
         
         self.rewardsPerEpisode = 0     #keep track of rewards
         self.successfulEpisodes = 0
-        self.observations = np.repeat(-1,1000*5000)    #keep track of reached states
+#        self.observations = np.repeat(-1,1000*5000)    #keep track of reached states
         
       
     def initialise_wiring(self):
@@ -57,7 +57,7 @@ class ising:
             return self.s
         elif mode == 'motors':
             return self.motors
-        elif mode == 'sensors':          # isn't mode sensors the same as input??
+        elif mode == 'sensors':          
             return self.s[0:self.Ssize]
         elif mode == 'input':
             return self.sensors
@@ -74,7 +74,6 @@ class ising:
     def randomize_state(self):
         self.s = np.random.randint(0, 2, self.size) * 2 - 1           # make units -1 or 1 
         self.sensors = np.random.randint(0, 2, self.Ssize) * 2 - 1    # make sensors -1 or 1
-        self.motors = np.random.randint(0, 2, self.Msize) * 2 - 1 
 
     # Randomize the position of the agent
     def randomize_position(self):
@@ -111,7 +110,7 @@ class ising:
         self.observation = observation  # update latest observation
         
         self.rewardsPerEpisode += reward    #update rewards per episode
-        self.observations[(self.observations == -1).argmax()] = observation      #add to list woth visited states
+#        self.observations[(self.observations == -1).argmax()] = observation      #add to list woth visited states
 
     # Update the state of the sensor
     def UpdateSensors(self, state=None):
@@ -211,16 +210,23 @@ class ising:
         return dh, dJ
 
     # Algorithm for poising an agent in a critical regime
-    def CriticalLearning(self, Iterations, T=None):
+    def CriticalLearning(self, Iterations, T=None, reset=10):
         u = 0.01
         count = 0
         dh, dJ = self.AdjustCorrelations(T)
+        
+        fit = max(np.max(np.abs(self.c1 - self.c)), np.max(np.abs(self.m1 - self.m)))
+        x_max = np.max(self.x)
+        print(count, fit, x_max, np.max(np.abs(self.J)))
+        self.observations = np.repeat(-1,(Iterations+1)*T).reshape(Iterations+1, T)    #keep track of reached states
+        self.observations[count,:] = self.x 
+        
         for it in range(Iterations):
             count += 1
             self.h += u * dh
             self.J += u * dJ
 
-            if it % 10 == 0:
+            if it % reset == 0:
                 self.randomize_state()
                 self.randomize_position()
                 
@@ -228,15 +234,28 @@ class ising:
                     self.successfulEpisodes += 1
                 self.rewardsPerEpisode = 0
                 
-            Vmax = self.max_weights
-            for i in range(self.size):
-                if np.abs(self.h[i]) > Vmax:        # why do we need to restrict the weights and biases to a maximum value?
-                    self.h[i] = Vmax * np.sign(self.h[i])
-                for j in np.arange(i + 1, self.size):
-                    if np.abs(self.J[i, j]) > Vmax:
-                        self.J[i, j] = Vmax * np.sign(self.J[i, j])
+#            Vmax = self.max_weights
+#            for i in range(self.size):
+#                if np.abs(self.h[i]) > Vmax:        # why do we need to restrict the weights and biases to a maximum value?
+#                    self.h[i] = Vmax * np.sign(self.h[i])
+#                for j in np.arange(i + 1, self.size):
+#                    if np.abs(self.J[i, j]) > Vmax:
+#                        self.J[i, j] = Vmax * np.sign(self.J[i, j])
 
             dh, dJ = self.AdjustCorrelations(T)
+            
+            fit = max(np.max(np.abs(self.c1 - self.c)), np.max(np.abs(self.m1 - self.m)))
+            x_max = np.max(self.x)
+            if count % 1 == 0:
+                print(self.size,
+                    count,
+                    round(fit,4),
+                    x_max,
+                    round(np.mean(np.abs(self.J)),4),
+                    round(np.max(np.abs(self.J)),4),
+                    )
+                
+            self.observations[count,:] = self.x
            
     # Calculate hat_h_k for each k (expert)    
     def ExpectedValueExperts(self, sensors, motors):
@@ -285,6 +304,7 @@ class ising:
 #         pdb.set_trace()
         
         self.rewards = np.zeros(total_episodes)
+#        self.observations = np.repeat(-1, (total_episodes*(max_steps+1))).reshape(total_episodes, (max_steps+1)  # store all observations
         
         for episode in range(total_episodes):
             
@@ -292,6 +312,9 @@ class ising:
             
             state = self.env.reset()
             self.UpdateSensors(state)
+            
+#            self.x = np.repeat(-1, max_steps+1)     # to store observations for an episode
+#            self.x[0] = state
 
             action = self.ChooseAction(state, beta)
             self.UpdateMotors(action)
@@ -323,6 +346,7 @@ class ising:
                     break
                     
             self.rewards[episode] = reward
+#            self.observations[episode,:] = self.x
     
     # works with the network's actual sensors and motors
     def SarsaUpdate(self, Q1, reward, Q2, gamma, lr):
@@ -357,7 +381,6 @@ class ising:
         self.J[self.Ssize:-self.Msize, -self.Msize:] = self.J[self.Ssize:-self.Msize, -self.Msize:] + dWm
         
         # update biases
-        #!! not in the paper - I think this should be it??
         self.h[:self.Ssize] = self.h[:self.Ssize] + rDiff*self.sensors
         self.h[-self.Msize:] = self.h[-self.Msize:] + rDiff*self.motors
         self.h[self.Ssize:-self.Msize] =  self.h[self.Ssize:-self.Msize] + rDiff*ve
