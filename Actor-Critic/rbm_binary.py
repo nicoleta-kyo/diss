@@ -59,7 +59,7 @@ class ising:
             return self.s
         elif mode == 'motors':
             return self.motors
-        elif mode == 'sensors':          # isn't mode sensors the same as input??
+        elif mode == 'sensors':          
             return self.s[0:self.Ssize]
         elif mode == 'input':
             return self.sensors
@@ -76,7 +76,6 @@ class ising:
     def randomize_state(self):
         self.s = np.random.randint(0, 2, self.size) * 2 - 1           # make units -1 or 1 
         self.sensors = np.random.randint(0, 2, self.Ssize) * 2 - 1    # make sensors -1 or 1
-        self.motors = np.random.randint(0, 2, self.Msize) * 2 - 1 
 
     # Randomize the position of the agent
     def randomize_position(self):
@@ -106,8 +105,9 @@ class ising:
 
     # Update the position of the agent
     def Move(self):
+        
         action = int(np.digitize(
-            np.sum(self.s[-self.Msize:]) / self.Msize, [-2, -1/2, 0, 1/2, 2])) - 1
+                np.sum(self.s[-self.Msize:]) / self.Msize, [-2, -1/2, 0, 1/2, 2])) - 1
         observation, reward, done, info = self.env.step(action)
         
         self.observation = observation  # update latest observation
