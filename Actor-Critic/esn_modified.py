@@ -127,7 +127,6 @@ class ESN():
         self.lastoutput = np.zeros(self.n_inputs)
         
         self.initweights()
-        self.history={}
         
     def initweights(self):
         # initialize recurrent weights:
@@ -367,6 +366,9 @@ class ESN():
         unscaled_outputs = self._unscale_teacher(outputs)
         
         return unscaled_outputs
+    
+    def setHistory(episodes, steps, num_elements=2):
+        self.history = np.repeat(-1, episodes*steps*num_elements).reshape(episodes, steps, num_elements)
     
     def evalHistory(self):
         

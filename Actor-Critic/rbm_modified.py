@@ -127,6 +127,11 @@ class ising:
         self.rewardsPerEpisode += reward    #update rewards per episode
         self.observations[(self.observations == -1).argmax()] = observation      #add to list woth visited states
 
+    # Transorm the sensor input into integer index
+	def InputToIndex(self, x, xmax):
+		return int(np.floor((x + xmax) / (2 * xmax + 10 *
+                                    np.finfo(float).eps) * 2**self.Ssize))
+    
     # Update the state of the sensor
     def UpdateSensors(self, state=None, memory=None):
         if state is None:  # it is for critical learning
@@ -314,8 +319,10 @@ class ising:
         
         pdb.set_trace()
         
-        self.rewards = np.zeros(total_episodes)
-        
+#        self.rewards = np.repeat(-1, total_episodes*max_steps) # store all rewards
+#        self.observations = np.repeat(-1, (total_episodes*max_steps)).reshape(total_episodes, max_steps)  # store all observations
+        predictor.setHistory(total_episodes, max_steps)
+       
         for episode in range(total_episodes):
             
             beta = Beta[episode]
@@ -338,21 +345,26 @@ class ising:
             t = 0
             while t < max_steps:
                 
+                self.observations[episode, t] = state  # store observation
+                
                 # calculate m'
                 state_bit = bitfield(state, self.Ssize)     # binarise state
                 action_bit = bitfield(action, self.Msize)   # binarise action
                 esn_input = np.hstack([state_bit, action_bit]).reshape(1,-1)
+                predictor.history[] = esn_input
                 memory2 = self.predictor.get_states(esn_input, continuation=True)
                 
                 # step with a and receive obs'
                 state2, reward, done, info = self.env.step(action)
                 
+                self.rewards[episode, t] = reward   # store reward
+                
                 # choose a' based on s' = obs'+m'
-                state_memory2 = self.createJointInput(state2, memory2)   # add the predictor's state to the obsrvations
+                state_memory2 = self.createJointInput(state2, memory2) # add the predictor's state to the obsrvations
                 action2 = self.ChooseAction(state_memory2, beta)
                 
                 # calculate Q(s',a')
-                Q2 = -1*self.CalcFreeEnergy(state_memory2, action2)        #calculate Q2 = Q(s',a') = -F(s',a')
+                Q2 = -1*self.CalcFreeEnergy(state_memory2, action2) # calculate Q2 = Q(s',a') = -F(s',a')
 
                 # make update to the weights of the network currently having s and a
                 self.SarsaUpdate(Q1, reward, Q2, gamma, lr)
