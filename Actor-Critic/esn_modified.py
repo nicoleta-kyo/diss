@@ -291,6 +291,7 @@ class ESN():
         
         # remember the last state, input, output for later:
         self.laststate = states[-1, :]
+        self.lastextendedstate = extended_states[-1,:]
         self.lastinput = inputs_scaled[-1, :]
         if outputs is not None:
             self.lastoutput = teachers_scaled[-1, :]
@@ -305,7 +306,7 @@ class ESN():
        
         return out[1:]    #output without last state
 
-    def fit(self, outputs, inputs, inspect=False, continuation):
+    def fit(self, outputs, inputs, continuation, inspect=False):
         """
         [nk]
         Collect the network's reaction to training data, train readout weights.
@@ -323,7 +324,7 @@ class ESN():
         teachers_scaled = self._scale_teacher(outputs)
         
         # [nk] collect reservoir states
-        states = self.get_states(inputs, extended=True, continuation)
+        states = self.get_states(inputs, extended=True, continuation=continuation)
 
         # learn the weights, i.e. find the linear combination of collected
         # network states that is closest to the target output
@@ -423,7 +424,7 @@ class ESN():
         quality1 = self.evalHistory()
         
         # update filter with last input-output
-        self.RLSfilter.process_datum(self.laststate.reshape(-1,1), self.lastoutput.reshape(-1,1))
+        self.RLSfilter.process_datum(self.lastextendedstate.reshape(-1,1), self.lastoutput.reshape(-1,1))
         
         # calc C(p_new, hist)
         self.quality = self.evalHistory()
