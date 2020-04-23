@@ -353,7 +353,7 @@ class ising:
                 # calculate m'
 #                esn_input = np.hstack([state_bit, action_bit]).reshape(1,-1)
                 esn_input = np.array([state, action]).reshape(1,-1)
-                memory2 = self.predictor.get_states(esn_input, continuation=True)                                                                               
+                memory2 = self.predictor.get_states(esn_input, extended=False, continuation=True) # we only take state activations, not concatenate states with input which is done to train the weights and to also predict                                                                           
                 
                 # step with a and receive obs'
                 state2, ext_reward, done, info = self.env.step(action)
