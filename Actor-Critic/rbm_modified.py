@@ -150,7 +150,8 @@ class ising:
         
     # Update the state of the motor?
     def UpdateMotors(self, action):
-        self.motors = bitfield(self.InputToIndex(action, self.maxact, self.Msize), self.Msize)
+        self.motors = bitfield(action, self.Msize)
+#        self.motors = bitfield(self.InputToIndex(action, self.maxact, self.Msize), self.Msize)
 
     # Execute step of the Glauber algorithm to update the state of one unit
     def GlauberStep(self, i=None): 
@@ -332,11 +333,15 @@ class ising:
             
             beta = Beta[episode]
             
+            #memory is not reset per episode
+            if episode == 0:
+                memory = self.predictor.laststate
+            else:
+                memory = memory2
+            
             # reset the environment
             state = self.env.reset()
-            
-            # reset the memory of the predictor, reset the sensors
-            memory = self.predictor.resetState()
+            # update the sensors
             self.UpdateSensors(state, memory)
 
             # choose a (action) based on s = obs+m (obs+memory)

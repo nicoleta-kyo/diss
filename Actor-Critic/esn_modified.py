@@ -128,6 +128,7 @@ class ESN():
         self.transient = transient
         
         self.laststate = np.zeros(self.n_reservoir)
+        self.lastextendedstate = np.zeros(self.n_reservoir+self.n_inputs)
         self.lastinput = np.zeros(self.n_inputs)
         self.lastoutput = np.zeros(self.n_inputs)
         
@@ -168,8 +169,10 @@ class ESN():
         return W
     
     def resetState(self):
-        self.laststate = np.zeros((1,self.n_reservoir))
-        return self.laststate
+        self.laststate = np.zeros(self.n_reservoir)
+        self.lastextendedstate = np.zeros(self.n_reservoir+self.n_inputs)
+        self.lastinput = np.zeros(self.n_inputs)
+        self.lastoutput = np.zeros(self.n_inputs)
 
     def _update(self, state, input_pattern, output_pattern=None):
         """performs one update step.
@@ -391,43 +394,43 @@ class ESN():
         num_elem_hist = self.n_inputs + self.n_outputs
         self.history = np.repeat(-1, episodes*steps*num_elem_hist).reshape(episodes, steps, num_elem_hist)
     
-    # activate the network for each input of the history and create predictions
-    # evaluate the network by calculating the mse on the predictions vs the teacher outputs from the history
-    def evalHistory(self, allEpisodes=True):
+    
+    # internal reward: evaluate the current network on the history, fit it to the last teacher output from the history,
+    # evaluate the new network, return difference between the two
+    # Schmidhuber --> int_reward = C(p_old, hist) - C(p_new, hist)
+    def calculateInternalReward(self, allEpisodes=True):
+        
         if allEpisodes:
             
+            #------ calc C(p_old, hist)
             num_elem_hist = self.n_inputs + self.n_outputs
             hist = self.history[self.history != -1]  # take all time steps that happened
             hist = hist.reshape(int(len(hist)/num_elem_hist),num_elem_hist) # reshape into (all time steps, hist elements)
             inputs = hist[:,:self.n_inputs]
             teachers = hist[:,self.n_inputs:]    
             
-            self.lastoutput = teachers[-1,:]  # save last output for the update of the weights
+            # get reservoir activations for all history
+            res_states = self.get_states(inputs, extended=True, continuation=False)  #continuation is False because starts from first state
             
-            res_states = self.get_states(inputs, extended=True, continuation=True)
             # get predictions by applying the rls filter and then applying the activation function
-            preds = np.zeros((inputs.shape[0], self.n_outputs))
+            preds1 = np.zeros((inputs.shape[0], self.n_outputs))
             for i in range(inputs.shape[0]):
-                preds[i,:] = self.out_activation(self.RLSfilter.predict(res_states[i,:].reshape(-1,1)).T)       
+                preds1[i,:] = self.out_activation(self.RLSfilter.predict(res_states[i,:].reshape(-1,1)).T)       
            
             # calculate predictor quality
-            quality = np.mean((preds - teachers)**2)
+            quality1 = np.mean((preds1 - teachers)**2)
             
-        return quality
-    
-    # internal reward: evaluate the current network on the history, fit it to the last teacher output from the history,
-    # evaluate the new network, return difference between the two
-    # Schmidhuber --> int_reward = C(p_old, hist) - C(p_new, hist)
-    def calculateInternalReward(self):
-        
-        # calc C(p_old, hist)
-        quality1 = self.evalHistory()
-        
-        # update filter with last input-output
-        self.RLSfilter.process_datum(self.lastextendedstate.reshape(-1,1), self.lastoutput.reshape(-1,1))
-        
-        # calc C(p_new, hist)
-        self.quality = self.evalHistory()
+            #--------- update filter with last input-output
+            self.RLSfilter.process_datum(res_states[-1,:].reshape(-1,1), teachers[-1,:].reshape(-1,1))
+            
+            #------- calc C(p_new, hist)
+            preds2 = np.zeros((inputs.shape[0], self.n_outputs))
+            for i in range(inputs.shape[0]):
+                preds2[i,:] = self.out_activation(self.RLSfilter.predict(res_states[i,:].reshape(-1,1)).T)       
+           
+            # calculate predictor quality and save it
+            self.quality = np.mean((preds2 - teachers)**2)
         
         return (quality1 - self.quality)
     
+        
