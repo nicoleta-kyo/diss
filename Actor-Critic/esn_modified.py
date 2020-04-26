@@ -412,8 +412,8 @@ class ESN():
             inputs = hist[:,:self.n_inputs]
             teachers = hist[:,self.n_inputs:]
         else:
-            inputs = hist[:-self.defaultHistEval,:self.n_inputs]
-            teachers = hist[:-self.defaultHistEval,self.n_inputs:]
+            inputs = hist[-self.defaultHistEval:,:self.n_inputs]
+            teachers = hist[-self.defaultHistEval:,self.n_inputs:]
         
         # get reservoir activations for all history
         res_states = self.get_states(inputs, extended=True, continuation=False)  #continuation is False because starts from first state
