@@ -385,8 +385,8 @@ class ising:
                 self.SarsaUpdate(Q1, reward, Q2, gamma, lr)
 
                 vishidJ = np.hstack((self.J[:self.Inpsize,self.Inpsize:-self.Msize], np.transpose(self.J[self.Inpsize:-self.Msize, -self.Msize:])))
-                maxJ = np.max(vishidJ)
-                meanJ = np.mean(vishidJ)
+                maxJ = np.max(np.abs(vishidJ))
+                meanJ = np.mean(np.abs(vishidJ))
                 self.log[episode, t, :] = np.array([state, ext_reward, self.predictor.quality, Q1, int_reward, meanJ, maxJ])
 #                 print('episode: '+ str(episode),
 #                       ' t:' + str(t),
