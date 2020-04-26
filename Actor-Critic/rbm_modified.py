@@ -47,7 +47,7 @@ class ising:
         self.env = gym.make('FrozenLake8x8-v0')
         self.observation = self.env.reset()
         self.maxobs = 64   # !!!!!! For frozen Lake
-        self.maxact = 4
+        self.numact = 4
 
         self.BetaCrit = 1.0  
         self.defaultT = max(100, netsize * 20)
@@ -148,10 +148,9 @@ class ising:
         inp[self.Ssize:self.Inpsize] = memory  # use memory directly - better performance
         return inp
         
-    # Update the state of the motor?
+    # Update the state of the motor?     
     def UpdateMotors(self, action):
-        self.motors = bitfield(action, self.Msize)
-#        self.motors = bitfield(self.InputToIndex(action, self.maxact, self.Msize), self.Msize)
+        self.motors = action2bit(action, self.numact)
 
     # Execute step of the Glauber algorithm to update the state of one unit
     def GlauberStep(self, i=None): 
@@ -302,7 +301,7 @@ class ising:
 #         pdb.set_trace()
           
         #binarise action
-        action_bit = bitfield(action, self.Msize)
+        action_bit = action2bit(action, self.numact)
     
         ve = self.ExpectedValueExperts(state_bit, action_bit).reshape(-1,1)  #calculate expected hidden values
         ss = state_bit.reshape(1,-1)
@@ -327,7 +326,7 @@ class ising:
 #         pdb.set_trace()
 
         self.predictor.setHistory(total_episodes, max_steps)  # create history array 
-        self.log = np.tile(np.repeat(-1.0,6),(total_episodes, max_steps,1))  # track learning
+        self.log = np.tile(np.repeat(-1.0,7),(total_episodes, max_steps,1))  # track learning
         
         for episode in range(total_episodes):
             
@@ -385,8 +384,10 @@ class ising:
                 # make update to the weights of the network currently having s and a
                 self.SarsaUpdate(Q1, reward, Q2, gamma, lr)
 
-                dQ = Q2-Q1
-                self.log[episode, t, :] = np.array([state, ext_reward, self.predictor.quality, Q1, int_reward, dQ])
+                vishidJ = np.hstack((self.J[:self.Inpsize,self.Inpsize:-self.Msize], np.transpose(self.J[self.Inpsize:-self.Msize, -self.Msize:])))
+                maxJ = np.max(vishidJ)
+                meanJ = np.mean(vishidJ)
+                self.log[episode, t, :] = np.array([state, ext_reward, self.predictor.quality, Q1, int_reward, meanJ, maxJ])
 #                 print('episode: '+ str(episode),
 #                       ' t:' + str(t),
 #                       ' int_reward: ' + str(round(int_reward,4)), # improv. predictor
@@ -490,5 +491,12 @@ def bitfield(n, size):
 
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
+
+# actions to be converted to a discrete multinomial variable
+def action2bit(action, max_act):
+    bit_action = np.zeros(max_act)
+    bit_action[action] = 1
+    
+    return bit_action
 
 
