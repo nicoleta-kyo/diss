@@ -302,7 +302,7 @@ class ising:
 #         pdb.set_trace()
           
         #binarise action
-        action_bit = bitfield(self.InputToIndex(action, self.maxact, self.Msize), self.Msize)
+        action_bit = bitfield(action, self.Msize)
     
         ve = self.ExpectedValueExperts(state_bit, action_bit).reshape(-1,1)  #calculate expected hidden values
         ss = state_bit.reshape(1,-1)
