@@ -132,6 +132,8 @@ class ESN():
         self.lastinput = np.zeros(self.n_inputs)
         self.lastoutput = np.zeros(self.n_inputs)
         
+        self.defaultHistEval = 10000    # look at last n time steps when evaluating history
+        
         self.initweights()
         
     def initweights(self):
@@ -398,38 +400,43 @@ class ESN():
     # internal reward: evaluate the current network on the history, fit it to the last teacher output from the history,
     # evaluate the new network, return difference between the two
     # Schmidhuber --> int_reward = C(p_old, hist) - C(p_new, hist)
-    def calculateInternalReward(self, allEpisodes=True):
+    def calculateInternalReward(self, allEpisodes=False):
+            
+        #------ calc C(p_old, hist)
+        num_elem_hist = self.n_inputs + self.n_outputs
+        hist = self.history[self.history != -1]  # take all time steps that happened
+        hist = hist.reshape(int(len(hist)/num_elem_hist),num_elem_hist) # reshape into (all time steps, hist elements)
         
-        if allEpisodes:
-            
-            #------ calc C(p_old, hist)
-            num_elem_hist = self.n_inputs + self.n_outputs
-            hist = self.history[self.history != -1]  # take all time steps that happened
-            hist = hist.reshape(int(len(hist)/num_elem_hist),num_elem_hist) # reshape into (all time steps, hist elements)
+        # take all history or last 10k times steps
+        if allEpisodes or hist.shape[0] <= self.defaultHistEval:
             inputs = hist[:,:self.n_inputs]
-            teachers = hist[:,self.n_inputs:]    
-            
-            # get reservoir activations for all history
-            res_states = self.get_states(inputs, extended=True, continuation=False)  #continuation is False because starts from first state
-            
-            # get predictions by applying the rls filter and then applying the activation function
-            preds1 = np.zeros((inputs.shape[0], self.n_outputs))
-            for i in range(inputs.shape[0]):
-                preds1[i,:] = self.out_activation(self.RLSfilter.predict(res_states[i,:].reshape(-1,1)).T)       
-           
-            # calculate predictor quality
-            quality1 = np.mean((preds1 - teachers)**2)
-            
-            #--------- update filter with last input-output
-            self.RLSfilter.process_datum(res_states[-1,:].reshape(-1,1), teachers[-1,:].reshape(-1,1))
-            
-            #------- calc C(p_new, hist)
-            preds2 = np.zeros((inputs.shape[0], self.n_outputs))
-            for i in range(inputs.shape[0]):
-                preds2[i,:] = self.out_activation(self.RLSfilter.predict(res_states[i,:].reshape(-1,1)).T)       
-           
-            # calculate predictor quality and save it
-            self.quality = np.mean((preds2 - teachers)**2)
+            teachers = hist[:,self.n_inputs:]
+        else:
+            inputs = hist[:-self.defaultHistEval,:self.n_inputs]
+            teachers = hist[:-self.defaultHistEval,self.n_inputs:]
+        
+        # get reservoir activations for all history
+        res_states = self.get_states(inputs, extended=True, continuation=False)  #continuation is False because starts from first state
+        
+        # get predictions by applying the rls filter and then applying the activation function
+        preds1 = np.zeros((inputs.shape[0], self.n_outputs))
+        for i in range(inputs.shape[0]):
+            preds1[i,:] = self.out_activation(self.RLSfilter.predict(res_states[i,:].reshape(-1,1)).T)       
+       
+        # calculate predictor quality
+        quality1 = np.mean((preds1 - teachers)**2)
+        
+        #--------- update filter with last input-output
+        self.RLSfilter.process_datum(res_states[-1,:].reshape(-1,1), teachers[-1,:].reshape(-1,1))
+        
+        #------- calc C(p_new, hist)
+        preds2 = np.zeros((inputs.shape[0], self.n_outputs))
+        for i in range(inputs.shape[0]):
+            preds2[i,:] = self.out_activation(self.RLSfilter.predict(res_states[i,:].reshape(-1,1)).T)       
+       
+        # calculate predictor quality and save it
+        self.quality = np.mean((preds2 - teachers)**2)
+
         
         return (quality1 - self.quality)
     
