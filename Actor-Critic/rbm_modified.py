@@ -8,8 +8,9 @@ Changes:
      
 For Otsuka's model architecture:
 - Memory layer
-- Predictor ESN as parameter so it can have access to its state
+- Predictor ESN as parameter so it can have access to its reservoir and history
 - Sensors are 0/1 for SARSA learning and -1/1 for critical learning
+- SARSA learning includes updating the predictor's history and getting its internal reward
 
 """ 
 
@@ -18,7 +19,6 @@ import numpy as np
 from itertools import combinations
 import matplotlib.pyplot as plt
 import gym
-import math
 
 import pdb
 
@@ -46,6 +46,8 @@ class ising:
 
         self.env = gym.make('FrozenLake8x8-v0')
         self.observation = self.env.reset()
+        self.maxobs = 64   # !!!!!! For frozen Lake
+        self.numact = 4
 
         self.BetaCrit = 1.0  
         self.defaultT = max(100, netsize * 20)
@@ -55,11 +57,10 @@ class ising:
 
         self.Ssize1 = 0
         
-        self.rewardsPerEpisode = 0     #keep track of rewards
+        self.rewardsPerEpisode = 0     #keep track of rewards (for crit)
         self.successfulEpisodes = 0
-        self.observations = np.repeat(-1,1000*5000)    #keep track of reached states
         
-      
+    # method when using SARSA learning. Initialisation acc to Otsuka's thesis
     def initialise_wiring(self):
         self.J = np.random.normal(0, 0.1, (self.size, self.size))
 
@@ -127,23 +128,29 @@ class ising:
         self.rewardsPerEpisode += reward    #update rewards per episode
         self.observations[(self.observations == -1).argmax()] = observation      #add to list woth visited states
 
+    # Transorm the sensor/motor input into integer index
+    def InputToIndex(self, x, xmax, bitsize):
+        return int(np.floor((x + xmax) / (2 * xmax + 10 * np.finfo(float).eps) * 2**bitsize))
+    
     # Update the state of the sensor
     def UpdateSensors(self, state=None, memory=None):
-        if state is None:  # it is for critical learning
+        if state is None:  # it is for critical learning: {-1; 1}
             self.sensors[:self.Ssize] = 2 * bitfield(self.observation, self.Ssize) - 1
             self.sensors[self.Ssize:self.Inpsize] = 2 * memory - 1
-        else:              # it is for noncritical, sarsa learning
+        else:              # it is for noncritical, sarsa learning: {0; 1}
             self.sensors = self.createJointInput(state, memory)
        
+    # Create state nodes for ESN to be observation from env + predictor's memory
+    # observation is binarised {0; 1}, linear memory nodes are used directly
     def createJointInput(self, state, memory):
         inp = np.zeros(self.Inpsize)
-        inp[:self.Ssize] = bitfield(state, self.Ssize)
-        inp[self.Ssize:self.Inpsize] = memory
+        inp[:self.Ssize] = bitfield(self.InputToIndex(state, self.maxobs, self.Ssize), self.Ssize) # binarise observation
+        inp[self.Ssize:self.Inpsize] = memory  # use memory directly - better performance
         return inp
         
-    # Update the state of the motor?
+    # Update the state of the motor?     
     def UpdateMotors(self, action):
-        self.motors = bitfield(action, self.Msize)
+        self.motors = action2bit(action, self.numact)
 
     # Execute step of the Glauber algorithm to update the state of one unit
     def GlauberStep(self, i=None): 
@@ -182,6 +189,7 @@ class ising:
 
     # Step of the learning algorith to ajust correlations to the critical regime
     def AdjustCorrelations(self, T=None):
+          
         if T is None:
             T = self.defaultT
 
@@ -240,6 +248,9 @@ class ising:
 
     # Algorithm for poising an agent in a critical regime
     def CriticalLearning(self, Iterations, T=None):
+        
+        self.observations = np.repeat(-1,Iterations*T)    #keep track of reached states
+        
         u = 0.01
         count = 0
         dh, dJ = self.AdjustCorrelations(T)
@@ -290,7 +301,7 @@ class ising:
 #         pdb.set_trace()
           
         #binarise action
-        action_bit = bitfield(action, self.Msize)
+        action_bit = action2bit(action, self.numact)
     
         ve = self.ExpectedValueExperts(state_bit, action_bit).reshape(-1,1)  #calculate expected hidden values
         ss = state_bit.reshape(1,-1)
@@ -308,23 +319,28 @@ class ising:
         for k in range(len(ve)):
             f += ve[k]*np.log(ve[k]) + (1 - ve[k])*np.log(1 - ve[k])
         
-        return (a+b+c+d+e+f)
+        return float(a+b+c+d+e+f)
     
     def SarsaLearning(self, total_episodes, max_steps, Beta, gamma=None, lr=None):
         
-        pdb.set_trace()
-        
-        self.rewards = np.zeros(total_episodes)
+#         pdb.set_trace()
+
+        self.predictor.setHistory(total_episodes, max_steps)  # create history array 
+        self.log = np.tile(np.repeat(-1.0,7),(total_episodes, max_steps,1))  # track learning
         
         for episode in range(total_episodes):
             
             beta = Beta[episode]
             
+            #memory is not reset per episode
+            if episode == 0:
+                memory = self.predictor.laststate
+            else:
+                memory = memory2
+            
             # reset the environment
             state = self.env.reset()
-            
-            # reset the memory of the predictor, reset the sensors
-            memory = self.predictor.resetState()
+            # update the sensors
             self.UpdateSensors(state, memory)
 
             # choose a (action) based on s = obs+m (obs+memory)
@@ -336,26 +352,48 @@ class ising:
             Q1 = -1*self.CalcFreeEnergy(state_memory, action)
 
             t = 0
-            while t < max_steps:
+            while t < max_steps:             
                 
                 # calculate m'
-                state_bit = bitfield(state, self.Ssize)     # binarise state
-                action_bit = bitfield(action, self.Msize)   # binarise action
-                esn_input = np.hstack([state_bit, action_bit]).reshape(1,-1)
-                memory2 = self.predictor.get_states(esn_input, continuation=True)
+#                esn_input = np.hstack([state_bit, action_bit]).reshape(1,-1)
+                esn_input = np.array([state, action]).reshape(1,-1)
+                memory2 = self.predictor.get_states(esn_input, extended=False, continuation=True) # we only take state activations, not concatenate states with input which is done to train the weights and to also predict                                                                           
                 
                 # step with a and receive obs'
-                state2, reward, done, info = self.env.step(action)
+                state2, ext_reward, done, info = self.env.step(action)
+                
+                #--
+                
+                # Predictor improvement and calculation of internal reward
+                self.predictor.history[episode,t,:] = np.array([state, action, state2, ext_reward])  # update predictor history
+                int_reward = self.predictor.calculateInternalReward() # calculate internal reward
+            
+                # Calculation of reward for SARSA update
+                reward = int_reward+ext_reward  # reward used for SARSA update
+#                reward = int_reward
+                
+                #--
                 
                 # choose a' based on s' = obs'+m'
-                state_memory2 = self.createJointInput(state2, memory2)   # add the predictor's state to the obsrvations
+                state_memory2 = self.createJointInput(state2, memory2) # add the predictor's state to the obsrvations
                 action2 = self.ChooseAction(state_memory2, beta)
                 
                 # calculate Q(s',a')
-                Q2 = -1*self.CalcFreeEnergy(state_memory2, action2)        #calculate Q2 = Q(s',a') = -F(s',a')
-
+                Q2 = -1*self.CalcFreeEnergy(state_memory2, action2) # calculate Q2 = Q(s',a') = -F(s',a')
+                
                 # make update to the weights of the network currently having s and a
                 self.SarsaUpdate(Q1, reward, Q2, gamma, lr)
+
+                vishidJ = np.hstack((self.J[:self.Inpsize,self.Inpsize:-self.Msize], np.transpose(self.J[self.Inpsize:-self.Msize, -self.Msize:])))
+                maxJ = np.max(np.abs(vishidJ))
+                meanJ = np.mean(np.abs(vishidJ))
+                self.log[episode, t, :] = np.array([state, ext_reward, self.predictor.quality, Q1, int_reward, meanJ, maxJ])
+#                 print('episode: '+ str(episode),
+#                       ' t:' + str(t),
+#                       ' int_reward: ' + str(round(int_reward,4)), # improv. predictor
+#                       ' ext_reward: ' + str(ext_reward),
+#                       ' dQ: ' + str(round(Q2 - Q1,4)),  # change in free-energy
+#                 )
 
                 # updates for loop
                 self.UpdateSensors(state2, memory2)  # update the network's sensors to be s' 
@@ -368,8 +406,7 @@ class ising:
 
                 if done:
                     break
-                    
-            self.rewards[episode] = reward
+
     
     # works with the network's actual sensors and motors
     def SarsaUpdate(self, Q1, reward, Q2, gamma, lr):
@@ -404,7 +441,6 @@ class ising:
         self.J[self.Inpsize:-self.Msize, -self.Msize:] = self.J[self.Inpsize:-self.Msize, -self.Msize:] + dWm
         
         # update biases
-        #!! not in the paper - I think this should be it??
         self.h[:self.Inpsize] = self.h[:self.Inpsize] + rDiff*self.sensors
         self.h[-self.Msize:] = self.h[-self.Msize:] + rDiff*self.motors
         self.h[self.Inpsize:-self.Msize] =  self.h[self.Inpsize:-self.Msize] + rDiff*ve
@@ -412,6 +448,8 @@ class ising:
     
     # state = observation + memory
     def ChooseAction(self, state, beta):
+        
+#         pdb.set_trace()
         
         try:
             # calculate probabilities of all actions - based on Otsuka's paper
@@ -453,5 +491,12 @@ def bitfield(n, size):
 
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
+
+# actions to be converted to a discrete multinomial variable
+def action2bit(action, max_act):
+    bit_action = np.zeros(max_act)
+    bit_action[action] = 1
+    
+    return bit_action
 
 

@@ -14,11 +14,16 @@ Changes for Otsuka's model architecture:
     - ???? initialisation of reservoir weights
     - default out activation: tanh
     - get_states method to work with continuation
+    - fit and predict methods take reservoir units (output from get_states) directly
+Intrinsic Motivation Schmidhuber
+    - history object: for each n in N_T (episodes*num_steps): [state, action, state2, reward]
+    - evalHistory and calculateReward methods
 
 """
 
 import numpy as np
 from sklearn.linear_model import Ridge
+from cannon_rlsfilter import RLSFilterAnalyticIntercept
 #import warnings
 #warnings.filterwarnings("error")
 
@@ -100,7 +105,7 @@ class ESN():
         # check for proper dimensionality of all arguments and write them down.
         self.n_inputs = n_inputs
         self.n_reservoir = n_reservoir
-        self.n_outputs = n_outputs
+        self.n_outputs = n_outputs   # part will be obs, part will be reward
         self.spectral_radius = spectral_radius
         self.sparsity = sparsity
         self.noise = noise
@@ -123,36 +128,53 @@ class ESN():
         self.transient = transient
         
         self.laststate = np.zeros(self.n_reservoir)
+        self.lastextendedstate = np.zeros(self.n_reservoir+self.n_inputs)
         self.lastinput = np.zeros(self.n_inputs)
         self.lastoutput = np.zeros(self.n_inputs)
         
+        self.defaultHistEval = 10000    # look at last n time steps when evaluating history
+        
         self.initweights()
-        self.history={}
         
     def initweights(self):
+        
         # initialize recurrent weights:
+        self.W = self.initialise_reservoir()
+            
+        # [nk] following Jaeger's paper:
+        # added scaling
+        self.W_in = np.random.uniform(low = -0.1, high = 0.1, size = (self.n_reservoir, self.n_inputs))*self.input_weights_scaling
+             
+        # random feedback (teacher forcing) weights:
+        self.W_feedb = np.random.RandomState().rand(
+            self.n_reservoir, self.n_outputs) * 2 - 1
+                
+        # filter for online learning
+        self.RLSfilter = RLSFilterAnalyticIntercept(self.n_reservoir+self.n_inputs, self.n_outputs, forgetting_factor=0.995)
+          
+        
+    def initialise_reservoir(self):
         
         # [nk] following Jaeger's paper:
         W = np.random.uniform(low = -1, high = 1, size = (self.n_reservoir, self.n_reservoir))
-        
         # delete the fraction of connections given by (self.sparsity):
         W[np.random.RandomState().rand(*W.shape) < self.sparsity] = 0
         # compute the spectral radius of these weights:
         radius = np.max(np.abs(np.linalg.eigvals(W)))
         # rescale them to reach the requested spectral radius:
-        self.W = W * (self.spectral_radius / radius)
-            
-        # [nk] following Jaeger's paper:
-        # added scaling
-        self.W_in = np.random.uniform(low = -0.1, high = 0.1, size = (self.n_reservoir, self.n_inputs))*self.input_weights_scaling
-                
-        # random feedback (teacher forcing) weights:
-        self.W_feedb = np.random.RandomState().rand(
-            self.n_reservoir, self.n_outputs) * 2 - 1
-                
+        # if radius = 0, reinitialise weights again randomly
+        try:
+            W = W * (self.spectral_radius / radius)
+        except:
+            self.initialise_reservoir()
+              
+        return W
+    
     def resetState(self):
-        self.laststate = np.zeros((1,self.n_reservoir))
-        return self.laststate
+        self.laststate = np.zeros(self.n_reservoir)
+        self.lastextendedstate = np.zeros(self.n_reservoir+self.n_inputs)
+        self.lastinput = np.zeros(self.n_inputs)
+        self.lastoutput = np.zeros(self.n_inputs)
 
     def _update(self, state, input_pattern, output_pattern=None):
         """performs one update step.
@@ -204,7 +226,7 @@ class ESN():
         return teacher_scaled
     
     
-    def get_states(self, inputs, outputs=None, inspect=False, extended=False, continuation=False):
+    def get_states(self, inputs, extended, continuation, outputs=None, inspect=False):
         """
         [nk]
         Collect the network's neuron activations.
@@ -255,7 +277,7 @@ class ESN():
                     [lastaugmentedstate,np.zeros((n_samples, self.n_reservoir*2+2))])
             
         
-        # step the reservoir through the given input, output pairs:
+        # activate the reservoir with the given input:
         for n in range(1, n_samples+1):
             if outputs is not None:
                 states[n, :] = self._update(states[n - 1], inputs_scaled[n, :],
@@ -274,6 +296,7 @@ class ESN():
         
         # remember the last state, input, output for later:
         self.laststate = states[-1, :]
+        self.lastextendedstate = extended_states[-1,:]
         self.lastinput = inputs_scaled[-1, :]
         if outputs is not None:
             self.lastoutput = teachers_scaled[-1, :]
@@ -288,7 +311,7 @@ class ESN():
        
         return out[1:]    #output without last state
 
-    def fit(self, inputs, outputs, inspect):
+    def fit(self, outputs, inputs, continuation, inspect=False):
         """
         [nk]
         Collect the network's reaction to training data, train readout weights.
@@ -306,7 +329,7 @@ class ESN():
         teachers_scaled = self._scale_teacher(outputs)
         
         # [nk] collect reservoir states
-        states = self.get_states(inputs, outputs, inspect)
+        states = self.get_states(inputs, extended=True, continuation=continuation)
 
         # learn the weights, i.e. find the linear combination of collected
         # network states that is closest to the target output
@@ -366,8 +389,55 @@ class ESN():
         
         unscaled_outputs = self._unscale_teacher(outputs)
         
-        return unscaled_outputs
+        return unscaled_outputs 
     
-    def evalHistory(self):
+    # array to store all obs + rewards
+    def setHistory(self, episodes, steps):
+        num_elem_hist = self.n_inputs + self.n_outputs
+        self.history = np.repeat(-1, episodes*steps*num_elem_hist).reshape(episodes, steps, num_elem_hist)
+    
+    
+    # internal reward: evaluate the current network on the history, fit it to the last teacher output from the history,
+    # evaluate the new network, return difference between the two
+    # Schmidhuber --> int_reward = C(p_old, hist) - C(p_new, hist)
+    def calculateInternalReward(self, allEpisodes=False):
+            
+        #------ calc C(p_old, hist)
+        num_elem_hist = self.n_inputs + self.n_outputs
+        hist = self.history[self.history != -1]  # take all time steps that happened
+        hist = hist.reshape(int(len(hist)/num_elem_hist),num_elem_hist) # reshape into (all time steps, hist elements)
         
+        # take all history or last 10k times steps
+        if allEpisodes or hist.shape[0] <= self.defaultHistEval:
+            inputs = hist[:,:self.n_inputs]
+            teachers = hist[:,self.n_inputs:]
+        else:
+            inputs = hist[-self.defaultHistEval:,:self.n_inputs]
+            teachers = hist[-self.defaultHistEval:,self.n_inputs:]
+        
+        # get reservoir activations for all history
+        res_states = self.get_states(inputs, extended=True, continuation=False)  #continuation is False because starts from first state
+        
+        # get predictions by applying the rls filter and then applying the activation function
+        preds1 = np.zeros((inputs.shape[0], self.n_outputs))
+        for i in range(inputs.shape[0]):
+            preds1[i,:] = self.out_activation(self.RLSfilter.predict(res_states[i,:].reshape(-1,1)).T)       
+       
+        # calculate predictor quality
+        quality1 = np.mean((preds1 - teachers)**2)
+        
+        #--------- update filter with last input-output
+        self.RLSfilter.process_datum(res_states[-1,:].reshape(-1,1), teachers[-1,:].reshape(-1,1))
+        
+        #------- calc C(p_new, hist)
+        preds2 = np.zeros((inputs.shape[0], self.n_outputs))
+        for i in range(inputs.shape[0]):
+            preds2[i,:] = self.out_activation(self.RLSfilter.predict(res_states[i,:].reshape(-1,1)).T)       
+       
+        # calculate predictor quality and save it
+        self.quality = np.mean((preds2 - teachers)**2)
+
+        
+        return (quality1 - self.quality)
     
+        
