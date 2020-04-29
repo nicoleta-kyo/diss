@@ -24,8 +24,10 @@ Intrinsic Motivation Schmidhuber
 import numpy as np
 from sklearn.linear_model import Ridge
 from cannon_rlsfilter import RLSFilterAnalyticIntercept
+import math
 #import warnings
 #warnings.filterwarnings("error")
+
 
 
 def correct_dimensions(s, targetlength):
@@ -49,14 +51,26 @@ def correct_dimensions(s, targetlength):
     return s
 
 
-# sigmoid with gain to mimic tanh
-def sigmoid(x, gain=4):
+# sigmoid
+def sigmoid(x, gain=1):
     return 1 / (1 + np.exp(-gain*x))
 
 # !!! do I apply the gain to the predictions as well?
 def inv_sigmoid(x, gain=1):
     return np.log( (x*gain) / (1 - (x*gain) ) )
 
+def atanh(x):
+    #x is of shape (1, teachers)
+    
+    atanhx = np.zeros(x.shape[1])
+    for i,v in enumerate(x[0]):
+        atanhx[i] = math.atanh(v)
+        
+    return atanhx
+        
+
+def identity(x):
+    return x
 
 class ESN():
 
@@ -68,10 +82,11 @@ class ESN():
                  input_weights_scaling = 1,
                  input_scaling=None,input_shift=None,teacher_forcing=None, feedback_scaling=None,
                  teacher_scaling=None, teacher_shift=None,
-                 out_activation=np.tanh, inverse_out_activation=np.arctanh,
+                 out_activation=np.tanh, inverse_out_activation=atanh,
                  silent=True, 
                  augmented=False,
-                 transient=200
+                 transient=200,
+                 input_bias=0
                  ):
         """
         Args:
@@ -127,10 +142,14 @@ class ESN():
         self.augmented = augmented
         self.transient = transient
         
+        self.input_bias = input_bias
+        
         self.laststate = np.zeros(self.n_reservoir)
         self.lastextendedstate = np.zeros(self.n_reservoir+self.n_inputs)
-        self.lastinput = np.zeros(self.n_inputs)
+        self.lastinput = np.zeros(self.n_inputs+self.input_bias)
         self.lastoutput = np.zeros(self.n_inputs)
+        
+        
         
         self.defaultHistEval = 10000    # look at last n time steps when evaluating history
         
@@ -140,17 +159,20 @@ class ESN():
         
         # initialize recurrent weights:
         self.W = self.initialise_reservoir()
+        
+        # bias for the update of the states of the reservoir
+        self.reservoir_bias = np.dot(np.repeat(-0.5,self.n_reservoir),self.W)
             
         # [nk] following Jaeger's paper:
         # added scaling
-        self.W_in = np.random.uniform(low = -0.1, high = 0.1, size = (self.n_reservoir, self.n_inputs))*self.input_weights_scaling
+        self.W_in = np.random.uniform(low = -0.1, high = 0.1, size = (self.n_reservoir, self.n_inputs+self.input_bias))*self.input_weights_scaling
              
         # random feedback (teacher forcing) weights:
         self.W_feedb = np.random.RandomState().rand(
             self.n_reservoir, self.n_outputs) * 2 - 1
                 
         # filter for online learning
-        self.RLSfilter = RLSFilterAnalyticIntercept(self.n_reservoir+self.n_inputs, self.n_outputs, forgetting_factor=0.995)
+        self.RLSfilter = RLSFilterAnalyticIntercept(self.n_reservoir+self.n_inputs+self.input_bias, self.n_outputs, forgetting_factor=0.995)
           
         
     def initialise_reservoir(self):
@@ -181,6 +203,9 @@ class ESN():
         i.e., computes the next network state by applying the recurrent weights
         to the last state & and feeding in the current input and output patterns
         """
+        
+#         pdb.set_trace()
+        
         if self.teacher_forcing:
             preactivation = (np.dot(self.W, state)
                              + np.dot(self.W_in, input_pattern)
@@ -194,7 +219,8 @@ class ESN():
         # [nk] add noise - the original code added noise after applying non-linearity!
         preactivation = preactivation + self.noise * (np.random.uniform(0,1,self.n_reservoir))
         
-        activation = sigmoid(preactivation)
+        # apply activation function to the reservoir with the necessary gain and the bias = -0.5*W
+        activation = sigmoid(preactivation,4) + self.reservoir_bias
         
         return activation
 
@@ -245,6 +271,10 @@ class ESN():
             outputs = np.reshape(outputs, (len(outputs), -1))
 
         n_samples = inputs.shape[0]
+        
+        # add bias to inputs if there is such
+        if self.input_bias != 0:
+            inputs = np.hstack((inputs, np.ones((n_samples,1))))
             
         # use last state, input, output
         if continuation:
@@ -253,7 +283,7 @@ class ESN():
             lastoutput = self.lastoutput
         else:
             laststate = np.zeros(self.n_reservoir)
-            lastinput = np.zeros(self.n_inputs)
+            lastinput = np.zeros(self.n_inputs+self.input_bias)
             lastoutput = np.zeros(self.n_outputs)
             
         if not self.silent:
@@ -396,7 +426,6 @@ class ESN():
         num_elem_hist = self.n_inputs + self.n_outputs
         self.history = np.repeat(-1, episodes*steps*num_elem_hist).reshape(episodes, steps, num_elem_hist)
     
-    
     # internal reward: evaluate the current network on the history, fit it to the last teacher output from the history,
     # evaluate the new network, return difference between the two
     # Schmidhuber --> int_reward = C(p_old, hist) - C(p_new, hist)
@@ -415,16 +444,19 @@ class ESN():
             inputs = hist[-self.defaultHistEval:,:self.n_inputs]
             teachers = hist[-self.defaultHistEval:,self.n_inputs:]
         
+        # apply inverse ou activation to the teacher signal
+        teachers = self.inverse_out_activation(teachers)
+        
         # get reservoir activations for all history
         res_states = self.get_states(inputs, extended=True, continuation=False)  #continuation is False because starts from first state
         
-        # get predictions by applying the rls filter and then applying the activation function
+        # get predictions by applying the rls filter (without applying activation function)
         preds1 = np.zeros((inputs.shape[0], self.n_outputs))
         for i in range(inputs.shape[0]):
-            preds1[i,:] = self.out_activation(self.RLSfilter.predict(res_states[i,:].reshape(-1,1)).T)       
+            preds1[i,:] = self.out_activation(self.RLSfilter.predict(res_states[i,:].reshape(-1,1))).T       
        
         # calculate predictor quality
-        quality1 = np.mean((preds1 - teachers)**2)
+        quality1 = np.sqrt(np.mean((preds1 - teachers)**2))
         
         #--------- update filter with last input-output
         self.RLSfilter.process_datum(res_states[-1,:].reshape(-1,1), teachers[-1,:].reshape(-1,1))
@@ -432,10 +464,10 @@ class ESN():
         #------- calc C(p_new, hist)
         preds2 = np.zeros((inputs.shape[0], self.n_outputs))
         for i in range(inputs.shape[0]):
-            preds2[i,:] = self.out_activation(self.RLSfilter.predict(res_states[i,:].reshape(-1,1)).T)       
+            preds2[i,:] = self.RLSfilter.predict(res_states[i,:].reshape(-1,1)).T     
        
         # calculate predictor quality and save it
-        self.quality = np.mean((preds2 - teachers)**2)
+        self.quality = np.sqrt(np.mean((preds2 - teachers)**2))
 
         
         return (quality1 - self.quality)

@@ -12,6 +12,8 @@ For Otsuka's model architecture:
 - Sensors are 0/1 for SARSA learning and -1/1 for critical learning
 - SARSA learning includes updating the predictor's history and getting its internal reward
 
+The rule update is episodic!!
+
 """ 
 
 
@@ -36,10 +38,7 @@ class ising:
         self.Inpsize = Nsensors + Nmemory  # Number of sensors+memory
 
         self.h = np.zeros(netsize) # local biases
-        self.J = np.zeros((netsize, netsize)) # symmetic weights between hidden variables
-        self.max_weights = 2          # why do we need to restrict the weights to a maximum value?
-
-        self.randomize_state() # initialisation of states s and sensors s
+        self.J = np.random.normal(0, 0.1, (self.size, self.size)) # symmetic weights between hidden variables
         
         if predictor is not None:
             self.predictor = predictor
@@ -48,27 +47,16 @@ class ising:
         self.observation = self.env.reset()
         self.maxobs = 64   # !!!!!! For frozen Lake
         self.numact = 4
-
-        self.BetaCrit = 1.0  
-        self.defaultT = max(100, netsize * 20)
         
         self.defaultGamma = 0.999  # as in Otsuka - Solving POMPDs
         self.defaultLr = 0.01  # as in Otsuka - Solving POMPDs
-
-        self.Ssize1 = 0
-        
-        self.rewardsPerEpisode = 0     #keep track of rewards (for crit)
-        self.successfulEpisodes = 0
-        
-    # method when using SARSA learning. Initialisation acc to Otsuka's thesis
-    def initialise_wiring(self):
-        self.J = np.random.normal(0, 0.1, (self.size, self.size))
+   
 
     def get_state(self, mode='all'):
         if mode == 'all':
             return self.s
         elif mode == 'motors':
-            return self.motors
+            return self.s[-self.Msize:]
         elif mode == 'sensors': 
             return self.s[0:self.Inpsize]
         elif mode == 'input':
@@ -82,17 +70,6 @@ class ising:
     def get_state_index(self, mode='all'):
         return bool2int(0.5 * (self.get_state(mode) + 1))
 
-    # Randomize the state of the network
-    def randomize_state(self):
-        
-        self.s = np.random.randint(0, 2, self.size) * 2 - 1           # make units -1 or 1 
-        # the sensors act as biases to the sensor states
-        # !! does it make sense to randomise the memory as well?
-        self.sensors = np.random.randint(0, 2, self.Inpsize) * 2 - 1    # make sensor inputs -1 or 1
-
-    # Randomize the position of the agent
-    def randomize_position(self):
-        self.observation = self.env.reset()
 
     # Set random bias to sets of units of the system
     # bias to hidden and action
@@ -116,29 +93,10 @@ class ising:
         self.J[:self.Inpsize,-self.Msize:] = 0             # between sensor and motor
         self.J[-self.Msize:,-self.Msize:] = 0            # between motor
 
-    # Update the position of the agent
-    def Move(self):
-        action = int(np.digitize(
-            np.sum(self.s[-self.Msize:]) / self.Msize, [-2, -1/2, 0, 1/2, 2])) - 1
-        observation, reward, done, info = self.env.step(action)
-        
-        self.observation = observation  # update latest observation
-        self.action = action
-        
-        self.rewardsPerEpisode += reward    #update rewards per episode
-        self.observations[(self.observations == -1).argmax()] = observation      #add to list woth visited states
 
     # Transorm the sensor/motor input into integer index
     def InputToIndex(self, x, xmax, bitsize):
         return int(np.floor((x + xmax) / (2 * xmax + 10 * np.finfo(float).eps) * 2**bitsize))
-    
-    # Update the state of the sensor
-    def UpdateSensors(self, state=None, memory=None):
-        if state is None:  # it is for critical learning: {-1; 1}
-            self.sensors[:self.Ssize] = 2 * bitfield(self.observation, self.Ssize) - 1
-            self.sensors[self.Ssize:self.Inpsize] = 2 * memory - 1
-        else:              # it is for noncritical, sarsa learning: {0; 1}
-            self.sensors = self.createJointInput(state, memory)
        
     # Create state nodes for ESN to be observation from env + predictor's memory
     # observation is binarised {0; 1}, linear memory nodes are used directly
@@ -147,135 +105,7 @@ class ising:
         inp[:self.Ssize] = bitfield(self.InputToIndex(state, self.maxobs, self.Ssize), self.Ssize) # binarise observation
         inp[self.Ssize:self.Inpsize] = memory  # use memory directly - better performance
         return inp
-        
-    # Update the state of the motor?     
-    def UpdateMotors(self, action):
-        self.motors = action2bit(action, self.numact)
 
-    # Execute step of the Glauber algorithm to update the state of one unit
-    def GlauberStep(self, i=None): 
-        if i is None:
-            i = np.random.randint(self.size)
-
-        I = 0
-        if i < self.Inpsize:
-            I = self.sensors[i]
-        eDiff = 2 * self.s[i] * (self.h[i] + I +
-                                 np.dot(self.J[i, :] + self.J[:, i], self.s))
-        if eDiff * self.BetaCrit < np.log(1 / np.random.rand() - 1):    # Glauber
-            self.s[i] = -self.s[i]
-
-    # Update random unit of the agent
-    def Update(self, i=None):
-        if i is None:
-            i = np.random.randint(-1, self.size)
-        if i == -1:
-            self.Move()
-            
-            # m' = f(s, a)  
-            state_bit = bitfield(self.sensors, self.Ssize)     # (self.sensors = s, self.observation = s')
-            action_bit = bitfield(self.action, self.Msize)     # (self.action = a)
-            esn_input = np.hstack([state_bit, action_bit]).reshape(1,-1)
-            memory = self.predictor.get_states(esn_input, continuation=True)
-            
-            self.UpdateSensors(memory=memory)
-        else:
-            self.GlauberStep(i)
-
-    # Sequentially update state of all units of the agent in random order
-    def SequentialUpdate(self):
-        for i in np.random.permutation(range(-1, self.size)):
-            self.Update(i)
-
-    # Step of the learning algorith to ajust correlations to the critical regime
-    def AdjustCorrelations(self, T=None):
-          
-        if T is None:
-            T = self.defaultT
-
-        self.m = np.zeros(self.size)
-        self.c = np.zeros((self.size, self.size))
-        self.C = np.zeros((self.size, self.size))
-
-        # Main simulation loop:
-        self.x = np.zeros(T)      # to store the positions of the car during all T
-        samples = []
-        for t in range(T):
-
-            self.SequentialUpdate()
-            self.x[t] = self.observation
-            self.m += self.s
-            for i in range(self.size):
-                self.c[i, i + 1:] += self.s[i] * self.s[i + 1:]
-        self.m /= T
-        self.c /= T
-        for i in range(self.size):
-            self.C[i, i + 1:] = self.c[i, i + 1:] - self.m[i] * self.m[i + 1:]
-
-        c1 = np.zeros((self.size, self.size))
-        for i in range(self.size):
-            inds = np.array([], int)
-            c = np.array([])
-            for j in range(self.size):
-                if not i == j:
-                    inds = np.append(inds, [j])
-                if i < j:
-                    c = np.append(c, [self.c[i, j]])
-                elif i > j:
-                    c = np.append(c, [self.c[j, i]])
-            order = np.argsort(c)[::-1]
-            c1[i, inds[order]] = self.Cint[i, :]
-        self.c1 = np.triu(c1 + c1.T, 1)
-        self.c1 *= 0.5
-
-        self.m[0:self.Inpsize] = 0          
-        self.m1[0:self.Inpsize] = 0     #sensors have objective mean 0 but in the paper they say it's all of the units but the sensors that have mean 0??
-        self.c[0:self.Inpsize, 0:self.Inpsize] = 0    #set corr in between sensors to 0
-        self.c[-self.Msize:, -self.Msize:] = 0    #set corr in between motors to 0
-        self.c[0:self.Inpsize, -self.Msize:] = 0    #set corr between sensors and motors to 0
-        self.c1[0:self.Inpsize, 0:self.Inpsize] = 0
-        self.c1[-self.Msize:, -self.Msize:] = 0
-        self.c1[0:self.Inpsize, -self.Msize:] = 0
-        
-        # make it restricted BM
-        self.c[self.Inpsize:-self.Msize,self.Inpsize:-self.Msize] = 0   #set corr in between hidden units to 0
-        self.c1[self.Inpsize:-self.Msize,self.Inpsize:-self.Msize] = 0   #for reference as well
-        
-        dh = self.m1 - self.m
-        dJ = self.c1 - self.c
-
-        return dh, dJ
-
-    # Algorithm for poising an agent in a critical regime
-    def CriticalLearning(self, Iterations, T=None):
-        
-        self.observations = np.repeat(-1,Iterations*T)    #keep track of reached states
-        
-        u = 0.01
-        count = 0
-        dh, dJ = self.AdjustCorrelations(T)
-        for it in range(Iterations):
-            count += 1
-            self.h += u * dh
-            self.J += u * dJ
-
-            if it % 10 == 0:
-                self.randomize_state()
-                self.randomize_position()
-                
-                if self.rewardsPerEpisode >= 1:     # keep track of the times the agent reached the goal
-                    self.successfulEpisodes += 1
-                self.rewardsPerEpisode = 0
-                
-            Vmax = self.max_weights
-            for i in range(self.size):
-                if np.abs(self.h[i]) > Vmax:        # why do we need to restrict the weights and biases to a maximum value?
-                    self.h[i] = Vmax * np.sign(self.h[i])
-                for j in np.arange(i + 1, self.size):
-                    if np.abs(self.J[i, j]) > Vmax:
-                        self.J[i, j] = Vmax * np.sign(self.J[i, j])
-
-            dh, dJ = self.AdjustCorrelations(T)
            
     # Calculate hat_h_k for each k (expert)    
     def ExpectedValueExperts(self, sensors, motors):
@@ -317,7 +147,7 @@ class ising:
         # calculate the negative entropy
         f = 0                                                           # 6 + 7
         for k in range(len(ve)):
-            f += ve[k]*np.log(ve[k]) + (1 - ve[k])*np.log(1 - ve[k])
+            f += ve[k]*np.log(ve[k] ) + (1 - ve[k])*np.log(1 - ve[k])
         
         return float(a+b+c+d+e+f)
     
@@ -326,7 +156,7 @@ class ising:
 #         pdb.set_trace()
 
         self.predictor.setHistory(total_episodes, max_steps)  # create history array 
-        self.log = np.tile(np.repeat(-1.0,7),(total_episodes, max_steps,1))  # track learning
+        self.log = np.tile(np.repeat(-1.0,7),(total_episodes, 1))  # track learning
         
         for episode in range(total_episodes):
             
@@ -340,17 +170,19 @@ class ising:
             
             # reset the environment
             state = self.env.reset()
-            # update the sensors
-            self.UpdateSensors(state, memory)
 
             # choose a (action) based on s = obs+m (obs+memory)
             state_memory = self.createJointInput(state, memory)
             action = self.ChooseAction(state_memory, beta)
-            self.UpdateMotors(action)
            
             # calculate Q(s,a)
             Q1 = -1*self.CalcFreeEnergy(state_memory, action)
 
+            self.initialiseDeltas()  # update of senhid weights, hidmot weights and the biases for the sen, mot and hid
+            Qs = np.repeat(-np.inf, max_steps)
+            PredQual = np.repeat(-np.inf, max_steps)
+            int_rew = np.repeat(-np.inf, max_steps)
+            
             t = 0
             while t < max_steps:             
                 
@@ -366,8 +198,10 @@ class ising:
                 
                 # Predictor improvement and calculation of internal reward
                 self.predictor.history[episode,t,:] = np.array([state, action, state2, ext_reward])  # update predictor history
-                int_reward = self.predictor.calculateInternalReward() # calculate internal reward
+                int_reward = np.tanh(self.predictor.calculateInternalReward()) # calculate internal reward
             
+                if int_reward < 0:
+                    int_reward = 0
                 # Calculation of reward for SARSA update
                 reward = int_reward+ext_reward  # reward used for SARSA update
 #                reward = int_reward
@@ -381,70 +215,92 @@ class ising:
                 # calculate Q(s',a')
                 Q2 = -1*self.CalcFreeEnergy(state_memory2, action2) # calculate Q2 = Q(s',a') = -F(s',a')
                 
-                # make update to the weights of the network currently having s and a
-                self.SarsaUpdate(Q1, reward, Q2, gamma, lr)
-
-                vishidJ = np.hstack((self.J[:self.Inpsize,self.Inpsize:-self.Msize], np.transpose(self.J[self.Inpsize:-self.Msize, -self.Msize:])))
-                maxJ = np.max(np.abs(vishidJ))
-                meanJ = np.mean(np.abs(vishidJ))
-                self.log[episode, t, :] = np.array([state, ext_reward, self.predictor.quality, Q1, int_reward, meanJ, maxJ])
-#                 print('episode: '+ str(episode),
-#                       ' t:' + str(t),
-#                       ' int_reward: ' + str(round(int_reward,4)), # improv. predictor
-#                       ' ext_reward: ' + str(ext_reward),
-#                       ' dQ: ' + str(round(Q2 - Q1,4)),  # change in free-energy
-#                 )
+                # calculate update to the weights of the network currently having s and a
+                self.SarsaUpdateOnline(Q1, reward, Q2, state_memory, action, gamma, lr)
+                
+                Qs[t] = Q1
+                PredQual[t] = self.predictor.quality
+                int_rew[t] = int_reward
 
                 # updates for loop
-                self.UpdateSensors(state2, memory2)  # update the network's sensors to be s' 
-                self.UpdateMotors(action2)  # update the network's motors to be a'
+                state_memory = state_memory2
                 state = state2  # update obs = obs'   (needed to calculate m' = obs + a)
                 action = action2  # update a = a'  (needed to calculate m' = obs + a and to also get obs')
                 Q1 = Q2  # no need to update m (memory), because Q1 is directly updated
 
                 t += 1
-
+                
                 if done:
                     break
+                
+            # apply episodic update rule: t+1 is the number of time steps out of the max actually performed
+            self.SarsaUpdateEpisodic(t)
+            
+            # update log
+            vishidJ = np.vstack((self.J[:self.Inpsize,self.Inpsize:-self.Msize], np.transpose(self.J[self.Inpsize:-self.Msize, -self.Msize:])))
+            self.log[episode, :] = np.array([state, ext_reward, np.mean(PredQual[:t]), np.mean(Qs[:t]), np.mean(int_rew[:t]),
+                    np.mean(np.abs(vishidJ)), np.max(np.abs(vishidJ))])
+            
 
-    
-    # works with the network's actual sensors and motors
-    def SarsaUpdate(self, Q1, reward, Q2, gamma, lr):
+    def SarsaUpdateOnline(self, Q1, reward, Q2, state_bit, action, gamma, lr):
+        
+#         pdb.set_trace()
         
         if gamma is None:
             gamma = self.defaultGamma
         if lr is None:
             lr = self.defaultLr
         
+        # TD error
         rDiff = lr*(reward + gamma * Q2 - Q1)
         
+        action_bit = action2bit(action, self.numact)
         # calculate dQ/Wsensors
-        ve = self.ExpectedValueExperts(self.sensors, self.motors).reshape(1,-1)
-        ve_new = np.repeat(ve, len(self.sensors)).reshape(-1,1)
-        s_ne = np.repeat(self.sensors.reshape(1,-1), ve.shape[1], axis=0)
+        ve = self.ExpectedValueExperts(state_bit, action_bit).reshape(1,-1)
+        ve_new = np.repeat(ve, len(state_bit)).reshape(-1,1)
+        s_ne = np.repeat(state_bit.reshape(1,-1), ve.shape[1], axis=0)
         s_new = s_ne.reshape(s_ne.shape[0]*s_ne.shape[1],1)
         dQdWs = np.multiply(ve_new,s_new)
         
         # calculate dQ/Wmotors
-        ve_new = np.repeat(ve, len(self.motors)).reshape(-1,1)
-        m_ne = np.repeat(self.motors.reshape(1,-1), ve.shape[1], axis=0)
+        ve_new = np.repeat(ve, len(action_bit)).reshape(-1,1)
+        m_ne = np.repeat(action_bit.reshape(1,-1), ve.shape[1], axis=0)
         m_new = m_ne.reshape(m_ne.shape[0]*m_ne.shape[1],1)
         dQdWm = np.multiply(ve_new,m_new)
         
-        # update weights of sensors and motors
+        # updates weights of sensors and motors
         num_h = self.size - (self.Inpsize+self.Msize)
+        self.dWs += (rDiff*dQdWs).reshape(num_h, self.Inpsize)
+        self.dWm += (rDiff*dQdWm).reshape(num_h, self.Msize)
         
-        dWs = (rDiff*dQdWs).reshape(num_h, self.Inpsize)
-        dWm = (rDiff*dQdWm).reshape(num_h, self.Msize)
+        # updtes biases of sensors, motors, hidden
+        self.dhs += rDiff*state_bit
+        self.dhm += rDiff*action_bit
+        self.dhh += rDiff*(ve.reshape(-1))
+    
+    def SarsaUpdateEpisodic(self, T, lr=None):
         
-        self.J[:self.Inpsize,self.Inpsize:-self.Msize] = np.transpose(np.transpose(self.J[:self.Inpsize,self.Inpsize:-self.Msize]) + dWs)
-        self.J[self.Inpsize:-self.Msize, -self.Msize:] = self.J[self.Inpsize:-self.Msize, -self.Msize:] + dWm
+        if lr is None:
+            lr = self.defaultLr
+        
+        # update weights
+        self.J[:self.Inpsize,self.Inpsize:-self.Msize] += lr*(self.dWs/T).T
+        self.J[self.Inpsize:-self.Msize, -self.Msize:] += lr*(self.dWm/T)
         
         # update biases
-        self.h[:self.Inpsize] = self.h[:self.Inpsize] + rDiff*self.sensors
-        self.h[-self.Msize:] = self.h[-self.Msize:] + rDiff*self.motors
-        self.h[self.Inpsize:-self.Msize] =  self.h[self.Inpsize:-self.Msize] + rDiff*ve
+        self.h[:self.Inpsize] += lr*(self.dhs/T)
+        self.h[-self.Msize:] += lr*(self.dhm/T)
+        self.h[self.Inpsize:-self.Msize] += lr*(self.dhh/T)
         
+    
+    def initialiseDeltas(self):
+        num_h = self.size - (self.Inpsize+self.Msize)
+        
+        self.dWs = np.zeros((num_h, self.Inpsize))
+        self.dWm = np.zeros((num_h, self.Msize))
+        self.dhs = np.zeros(self.Inpsize)
+        self.dhm = np.zeros(self.Msize)
+        self.dhh = np.zeros(num_h)
     
     # state = observation + memory
     def ChooseAction(self, state, beta):
@@ -473,6 +329,62 @@ class ising:
             pdb.set_trace()
  
         return act
+    
+    def displayRunData(self, total_episodes, num_el):
+
+        res = self.log
+    
+        # pred errors
+    
+        x = range(total_episodes)
+        y = res[:,2]
+    
+        fig, ax = plt.subplots()
+        line1, = ax.plot(x, y, label='mean predictor error')
+    
+        ax.legend()
+        plt.show()
+    
+        # int reward
+    
+        y = res[:,4]
+    
+        fig, ax = plt.subplots()
+        line1, = ax.plot(x, y, label='mean internal reward')
+    
+        ax.legend()
+        plt.show()
+    
+        # actor -free energy
+    
+        y = res[:,3]
+    
+        fig, ax = plt.subplots()
+        line1, = ax.plot(x, y, label='mean negative free energy')
+    
+        ax.legend()
+        plt.show()
+    
+        # mean J
+    
+        y = res[:,5]
+    
+        fig, ax = plt.subplots()
+        line1, = ax.plot(x, y, label='mean J')
+    
+        ax.legend()
+        plt.show()
+    
+        # max J
+    
+        y = res[:,6]
+    
+        fig, ax = plt.subplots()
+        line1, = ax.plot(x, y, label='max J')
+    
+        ax.legend()
+        plt.show()
+
         
         
 # Transform bool array into positive integer
@@ -498,5 +410,4 @@ def action2bit(action, max_act):
     bit_action[action] = 1
     
     return bit_action
-
 
